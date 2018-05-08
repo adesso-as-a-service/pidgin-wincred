@@ -4,6 +4,7 @@
 #include <version.h>
 
 #include <account.h>
+#include <gtkaccount.h>
 #include <signal.h>
 #include <core.h>
 #include <debug.h>
@@ -11,8 +12,19 @@
 #include <glib.h>
 #include <string.h>
 
+#ifndef UNICODE
+#define UNICODE
+#endif
+
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
 #include <windows.h>
 #include <wincred.h>
+
+
+
 
 #define MAX_READ_LEN 2048
 #define PLUGIN_ID "core-wincred"
@@ -24,6 +36,8 @@ static BOOL keyring_password_get(PurpleAccount *account);
 static gchar * create_account_str(PurpleAccount *account);
 static void sign_in_cb(PurpleAccount *account, gpointer data);
 static void connecting_cb(PurpleAccount *account, gpointer data);
+static void modified_cb(PurpleAccount *account, gpointer data);
+static void con_err_cb(PurpleAccount *account, PurpleConnectionError type, const gchar *description, gpointer data);
 static PurplePluginPrefFrame * get_pref_frame(PurplePlugin *plugin);
 
 /* function definitions */
@@ -33,10 +47,13 @@ static gboolean plugin_load(PurplePlugin *plugin) {
 
     GList *accountsList;
     void *accountshandle = purple_accounts_get_handle();
+    void *pidgin_accountshandle = pidgin_account_get_handle();
     /* notFound will be a list of accounts not found
      * in the keyring */
     GList *notFound = NULL;
     GList *notFound_iter;
+    purple_debug_info(PLUGIN_ID,
+            "[INFO] Plugin %s started\n", PLUGIN_ID);
     /* The first thing to do is set all the passwords. */
     for (accountsList = purple_accounts_get_all();
          accountsList != NULL;
@@ -63,6 +80,8 @@ static gboolean plugin_load(PurplePlugin *plugin) {
     }
     /* done with the notFound, so free it */
     g_list_free(notFound);
+
+
     /* create a signal which monitors whenever an account signs in,
      * so that the callback function can store/update the password */
     purple_signal_connect(accountshandle, "account-signed-on", plugin,
@@ -71,14 +90,93 @@ static gboolean plugin_load(PurplePlugin *plugin) {
      * so that the callback can make sure the password is set in pidgin */
     purple_signal_connect(accountshandle, "account-connecting", plugin,
             PURPLE_CALLBACK(connecting_cb), NULL);
-    /* at this point, the plugin is set up */
+    //modifying account triggers saving of new password
+    purple_signal_connect(pidgin_accountshandle, "account-modified", plugin,
+            PURPLE_CALLBACK(modified_cb), NULL);
+    //Failing
+    purple_signal_connect(accountshandle, "account-connection-error", plugin,
+            PURPLE_CALLBACK(con_err_cb), NULL);
+     /* at this point, the plugin is set up */
     return TRUE;
 }
 
+/* callback to whenever an account is signed in */
+static void modified_cb(PurpleAccount *account, gpointer data) {
+    purple_debug_info(PLUGIN_ID,
+            "[INFO] Account is modified %s\n", account->username);
+    if (account->password != NULL) {
+        keyring_password_store(account);
+    }
+    return;
+}
 
 /* callback to whenever an account is signed in */
 static void sign_in_cb(PurpleAccount *account, gpointer data) {
-    keyring_password_store(account);
+    if (purple_account_get_remember_password(account)){
+        purple_debug_info(PLUGIN_ID,
+                "[INFO] Storing new password in Credential for %s\n", account->username);
+        keyring_password_store(account);
+    } else {
+        purple_debug_info(PLUGIN_ID,
+                "[INFO] Password was not stored in Credential for %s\n", account->username);
+    }
+    return;
+}
+
+/* callback to whenever an account receives an connection error */
+static void con_err_cb(PurpleAccount *account, PurpleConnectionError type, const gchar *description, gpointer data) {
+    // If password is wrong 
+    if (type == PURPLE_CONNECTION_ERROR_AUTHENTICATION_FAILED && keyring_password_get(account)) {
+        TCHAR pszName[CREDUI_MAX_USERNAME_LENGTH+1];
+        TCHAR pszPwd[CREDUI_MAX_PASSWORD_LENGTH+1];
+        char pw[CREDUI_MAX_PASSWORD_LENGTH+1];
+        BOOL fSave;
+        DWORD dwErr;
+        CREDUI_INFO cui;
+        purple_debug_info(PLUGIN_ID,
+            "[INFO] Credential for account %s have probably changed\n",account->username);
+        cui.cbSize = sizeof(CREDUI_INFO);
+        cui.hwndParent = NULL;
+        cui.pszMessageText = TEXT("Your stored Pidgin-Password seems to be incorrect! Please enter your current password below and confirm. Afterwards just re-enable your account.");
+        cui.pszCaptionText = TEXT("Pidgin Credential");
+        cui.hbmBanner = NULL;
+        fSave = TRUE;
+        SecureZeroMemory(pszName, sizeof(pszName));
+        SecureZeroMemory(pszPwd, sizeof(pszPwd));
+        mbstowcs(pszName,account->username,CREDUI_MAX_USERNAME_LENGTH);
+        dwErr = CredUIPromptForCredentials( 
+            &cui,                         // CREDUI_INFO structure
+            TEXT("Pidgin"),            // Target for credentials
+                                        //   (usually a server)
+            NULL,                         // Reserved
+            0,                            // Reason
+            pszName,                      // User name
+            CREDUI_MAX_USERNAME_LENGTH+1, // Max number of char for user name
+            pszPwd,                       // Password
+            CREDUI_MAX_PASSWORD_LENGTH+1, // Max number of char for password
+            &fSave,                       // State of save check box
+            CREDUI_FLAGS_GENERIC_CREDENTIALS |  // flags
+            CREDUI_FLAGS_ALWAYS_SHOW_UI |
+            CREDUI_FLAGS_DO_NOT_PERSIST |
+            CREDUI_FLAGS_KEEP_USERNAME);
+
+        if(!dwErr)
+        {
+            //  Put code that uses the credentials here.
+            
+            wcstombs(pw, pszPwd, CREDUI_MAX_PASSWORD_LENGTH);
+            purple_account_set_password(account,&pw[0]);
+            purple_debug_info(PLUGIN_ID,
+                    "[INFO] Storing new password in Credential for %s\n", account->username);
+            keyring_password_store(account);
+            //  When you have finished using the credentials,
+            //  erase them from memory.
+        }
+        SecureZeroMemory(pszName, sizeof(pszName));
+        SecureZeroMemory(pszPwd, sizeof(pszPwd));
+        SecureZeroMemory(&pw[0], sizeof(&pw[0]));
+
+    }
     return;
 }
 
@@ -97,8 +195,17 @@ static void memory_clearing_function(PurpleAccount *account) {
  * this needs to ensure that there is a password
  * this may happen if the password was disabled, then later re-enabled */
 static void connecting_cb(PurpleAccount *account, gpointer data) {
+    purple_debug_info(PLUGIN_ID,
+            "[INFO] Looking for password for %s\n", account->username);
     if (account->password == NULL) {
-        keyring_password_get(account);
+        if (keyring_password_get(account)){
+            purple_debug_info(PLUGIN_ID,
+                    "[INFO] Password for %s found\n", account->username);
+        } else {
+            purple_debug_info(PLUGIN_ID,
+                    "[INFO] Password for %s not found\n", account->username);
+        }
+        
     }
 }
 
@@ -138,7 +245,7 @@ static void keyring_password_store(PurpleAccount *account) {
     cred.CredentialBlob = (BYTE *) unicode_password;
     cred.CredentialBlobSize = sizeof(BYTE) * sizeof(gunichar2) * length;
     /* write the credential, then free memory */
-    CredWriteW(&cred, 0);
+    CredWrite(&cred, 0);
     g_free(account_str);
     g_free(unicode_password);
     g_free(unicode_account_str);
@@ -190,9 +297,14 @@ static BOOL keyring_password_get(PurpleAccount *account) {
 static gboolean plugin_unload(PurplePlugin *plugin) {
     /* disconnect from signals */
     void *accounts_handle = purple_accounts_get_handle();
+     void *pidgin_accountshandle = pidgin_account_get_handle();
     purple_signal_disconnect(accounts_handle, "account-signed-on",
                              plugin, NULL);
     purple_signal_disconnect(accounts_handle, "account-connecting",
+                             plugin, NULL);
+    purple_signal_disconnect(pidgin_accountshandle, "account-modified",
+                             plugin, NULL);
+    purple_signal_disconnect(accounts_handle, "account-connection-error",
                              plugin, NULL);
     return TRUE;
 }
@@ -204,11 +316,6 @@ static PurplePluginUiInfo prefs_info = {
 
 static PurplePluginPrefFrame * get_pref_frame(PurplePlugin *plugin) {
     PurplePluginPrefFrame *frame = purple_plugin_pref_frame_new();
-    gchar *label = g_strdup_printf("Clear plaintext passwords from memory");
-    PurplePluginPref *pref = purple_plugin_pref_new_with_name_and_label(
-            "/plugins/core/wincred/clear_memory",
-            label);
-    purple_plugin_pref_frame_add(frame, pref);
     return frame;
 }
 
@@ -222,13 +329,13 @@ static PurplePluginInfo info = {
     PURPLE_PRIORITY_HIGHEST,
 
     PLUGIN_ID,
-    "Windows Credentials",
+    "Smarthouse Windows Credentials",
     /* version */
-    "0.6",
+    "0.7",
 
     "Save passwords as windows credentials instead of as plaintext",
     "Save passwords as windows credentials instead of as plaintext",
-    "Ali Ebrahim <ali.ebrahim314@gmail.com>",
+    "Ali Ebrahim <ali.ebrahim314@gmail.com>\nModified by Leo Schönborn <leonard.schoenborn@smarthouse.de>",
     "https://github.com/aebrahim/pidgin-wincred",
 
     plugin_load,
@@ -246,7 +353,7 @@ static PurplePluginInfo info = {
 
 static void init_plugin(PurplePlugin *plugin) {
     purple_prefs_add_none("/plugins/core/wincred");
-    purple_prefs_add_bool("/plugins/core/wincred/clear_memory", FALSE);
+    purple_prefs_add_bool("/plugins/core/wincred/clear_memory", TRUE);
 }
 
 PURPLE_INIT_PLUGIN(wincred, init_plugin, info)
