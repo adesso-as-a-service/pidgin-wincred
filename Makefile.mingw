@@ -6,8 +6,9 @@
 
 TARGET = pidgin-wincred.dll
 
-PIDGIN_TREE_TOP := ../..
+PIDGIN_TREE_TOP := ..
 include $(PIDGIN_TREE_TOP)/libpurple/win32/global.mak
+include $(PIDGIN_TREE_TOP)/local.mak
 .SUFFIXES: .c .dll
 
 ##
@@ -18,24 +19,29 @@ INCLUDE_PATHS +=	\
 			-I$(GTK_TOP)/include/glib-2.0 \
 			-I$(GTK_TOP)/lib/glib-2.0/include \
 			-I$(PIDGIN_TREE_TOP) \
+			-I$(PIDGIN_TREE_TOP)/pidgin \
 			-I$(PURPLE_TOP) \
 			-I$(PURPLE_TOP)/win32 \
 			-I`pwd`
 
 LIB_PATHS +=		\
 			-L$(GTK_TOP)/lib \
-			-L$(PURPLE_TOP)
+			-L$(PURPLE_TOP) \
+			$(PIDGIN_TREE_TOP)/pidgin/pidgin.dll.a
 
 ##
 ## LIBRARIES
 ##
 LIBS =	\
+			-lws2_32 \
 			-lglib-2.0 \
 			-lgobject-2.0 \
 			-lgmodule-2.0 \
 			-lintl \
-			-lws2_32 \
 			-lpurple \
+			-lcredui
+
+			
 
 CFLAGS = -O2 -Wall -Waggregate-return -Wcast-align -Wdeclaration-after-statement -Werror-implicit-function-declaration -Wextra -Wno-sign-compare -Wno-unused-parameter -Winit-self -Wmissing-declarations -Wmissing-prototypes -Wnested-externs -Wpointer-arith -Wundef -pipe -mms-bitfields -g
 
@@ -52,7 +58,7 @@ all: $(TARGET)
 	rm $@.o
 
 install: $(TARGET)
-	cp $(TARGET) /cygdrive/c/Users/$(USERNAME)/AppData/Roaming/.purple/plugins/
+	cp $(TARGET) /mnt/c/Users/$(USERNAME)/AppData/Roaming/.purple/plugins/
 
 
 
